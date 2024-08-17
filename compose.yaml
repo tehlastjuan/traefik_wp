@@ -1,0 +1,255 @@
+secrets:
+  db_user:
+    file: ${DOCKERDIR}/secrets/db_user
+  db_password:
+    file: ${DOCKERDIR}/secrets/db_password
+  db_root_password:
+    file: ${DOCKERDIR}/secrets/db_root_password
+  admin_user:
+    file: ${DOCKERDIR}/secrets/admin_user
+  admin_password:
+    file: ${DOCKERDIR}/secrets/admin_password
+  admin_email:
+    file: ${DOCKERDIR}/secrets/admin_email
+
+networks:
+  frontend:
+    external: true
+
+services:
+  # mkcert:
+  # environment:
+  #   - domain=*.local.host
+  # container_name: mkcert
+  # volumes:
+  #   - ${DOCKERDIR}/conf/certs/mkcert/:/root/.local/share/mkcert
+  # image: vishnunair/docker-mkcert
+  # labels:
+  #   - "traefik.enable=false"
+  # networks:
+  #   - frontend
+
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    command:
+      - --global.sendAnonymousUsage=false
+      # api frontend
+      - --api.dashboard=true
+      - --api.insecure=true
+      # traefik log
+      - --log=true
+      - --log.filePath="/logs/traefik.log"
+      - --accessLog=true
+      - --accessLog.filePath="/logs/access_traefik.log"
+      # docker
+      - --providers.docker.network=frontend
+      # - --providers.docker.endpoint=unix:///var/run/docker.sock
+      - --providers.docker.watch=true
+      - --providers.docker.exposedByDefault=false
+      # ssl
+      # - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.directory=/etc/traefik
+      - --providers.file.watch=true
+      # entrypoints
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      # - --entrypoints.websecure.asDefault=true
+      # certs
+      # - --entrypoints.https.http.tls.options=dynamic.yml@file
+      # - --entrypoints.websecure.http.tls.domains[0].main=${DOMAINNAME}
+      # - --entrypoints.websecure.http.tls.domains[0].sans=*.${DOMAINNAME}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      # - ${DOCKERDIR}/conf/rules/traefik.yml:/etc/traefik/traefik.yml:ro"
+      - ${DOCKERDIR}/conf/rules/dynamic.yml:/etc/traefik/dynamic.yml:ro"
+      - ${DOCKERDIR}/conf/certs/mkcert/:/etc/certs:ro"
+      - ${DOCKERDIR}/logs:/logs
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=frontend"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${DOMAINNAME}`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      # - "traefik.http.routers.traefik.service=traefik@docker"
+      - "traefik.http.services.traefik.loadbalancer.server.port=8080"
+    networks:
+      - frontend
+
+  whoami:
+    image: traefik/whoami
+    container_name: whoami
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoami.rule=Host(`whoami.${DOMAINNAME}`)"
+      - "traefik.http.routers.whoami.entrypoints=websecure"
+      # - "traefik.http.routers.whoami.service=whoami@docker"
+      - "traefik.http.services.whoami.loadbalancer.server.port=80"
+    networks:
+      - frontend
+
+  wp-db:
+    image: mysql:8.0
+    container_name: mysql
+    restart: unless-stopped
+    command: "--default-authentication-plugin=mysql_native_password"
+    environment:
+      TZ: $TZ
+      PUID: $PUID
+      PGID: $PGID
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_DATABASE: ${WP_DATABASE}
+      MYSQL_USER_FILE: /run/secrets/db_user
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+    networks:
+      - frontend
+    volumes:
+      # - ${DOCKERDIR}/conf/mysql:/etc/mysql/conf.d
+      - ${DOCKERDIR}/data/mysqldb:/var/lib/mysql
+      # - ${DOCKERDIR}/data/dwa_site:/var/lib/mysql/dwa_site
+    secrets:
+      - db_root_password
+      - db_user
+      - db_password
+    labels:
+      - "traefik.enable=false"
+
+  wp:
+    depends_on:
+      - wp-db
+    container_name: wp
+    image: wordpress:latest
+    restart: unless-stopped
+    environment:
+      TZ: $TZ
+      PUID: $PUID
+      PGID: $PGID
+      WORDPRESS_DB_HOST: wp-db:3306
+      WORDPRESS_DB_USER_FILE: /run/secrets/db_user
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
+      WORDPRESS_DB_NAME: ${WP_DATABASE}
+    volumes:
+      - ${DOCKERDIR}/data/wpress:/var/www/html
+      # - ${DOCKERDIR}/data/dwa_site:/var/www/html/dwa_site:ro
+    secrets:
+      - db_user
+      - db_password
+    networks:
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=frontend"
+      - "traefik.http.routers.wp.entrypoints=websecure"
+      - "traefik.http.routers.wp.rule=Host(`wp.${DOMAINNAME}`)"
+      # - "traefik.http.routers.whoami.service=whoami@docker"
+      - "traefik.http.services.wp.loadbalancer.server.port=80"
+
+  phpmyadmin:
+    depends_on:
+      - wp-db
+    container_name: phpmyadmin
+    image: phpmyadmin/phpmyadmin:latest
+    restart: unless-stopped
+    # links:
+    #   - wp-db
+    volumes:
+      # - ${DOCKERDIR}/conf/phpmyadmin/config.user.inc.php:/etc/phpmyadmin/config.user.inc.php
+      - ${DOCKERDIR}/data/phpmyadmin:/data
+    # ports:
+    #   - 8081:80
+    environment:
+      # PMA_ARBITRARY: 1
+      # PMA_ABSOLUTE_URI: /phpmyadmin/
+      PMA_HOST: wp-db
+      MYSQL_ROOT_PASSWORD: /run/secrets/db_root_password
+    secrets:
+      - db_root_password
+    networks:
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.phpmyadmin.entrypoints=websecure"
+      - "traefik.http.routers.phpmyadmin.rule=Host(`php.${DOMAINNAME}`)"
+      - "traefik.http.services.phpmyadmin.loadbalancer.server.port=80"
+  #
+  # # wp-cli:
+  # #   depends_on:
+  # #     - mysql
+  # #     - wordpress
+  # #   container_name: wpcli
+  # #   image: wordpress:cli
+  # #   # restart: always
+  # #   environment:
+  # #     PUID: $PUID
+  # #     PGID: $PGID
+  # #     TZ: $TZ
+  # #     WORDPRESS_DB_HOST: mysql:3306
+  # #     WORDPRESS_DB_USER_FILE: /run/secrets/db_user
+  # #     WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
+  # #     WORDPRESS_DB_NAME: wordpress
+  # #   volumes:
+  # #     - ${DOCKERDIR}/wp:/var/www/html
+  # #   secrets:
+  # #     - db_user
+  # #     - db_password
+  # #     - admin_user
+  # #     - admin_password
+  # #     - admin_email
+  # #   user: 1000:1000
+  # #   entrypoint: wp
+  # #   # command: "--info"
+  # #   command: >
+  # #     /bin/sh -c '
+  # #     sleep 10;
+  # #     wp core install --path="/var/www/html" --url="${URL}" --title="${TITLE}" --admin_user=$(cat /run/secrets/admin_user) --admin_email=$(cat /run/secrets/admin_email) --admin_password=$(cat /run/secrets/admin_password) --skip-email'
+  # #   # wp core install
+  # #   # --path="/var/www/html"
+  # #   # --url=http://${URL}
+  # #   # --title=${TITLE}
+  # #   # --admin_user=$(cat /run/secrets/admin_user)
+  # #   # --admin_password=$(cat /run/secrets/admin_password)
+  # #   # --admin_email=$(cat /run/secrets/admin_email)
+  # #   # --skip-email'
+
+  # nginx:
+  #   depends_on:
+  #     - wp
+  #   container_name: nginx
+  #   image: nginx:latest
+  #   restart: unless-stopped
+  #   networks:
+  #     - frontend
+  #   # ports:
+  #   #   - 80:80
+  #   #   - 443:443
+  #   environment:
+  #     TZ: $TZ
+  #     PUID: $PUID
+  #     PGID: $PGID
+  #   volumes:
+  #     - /etc/localtime:/etc/localtime:ro
+  #     - /etc/timezone:/etc/timezone:ro
+  #     # - ${DOCKERDIR}/logs/nginx:/var/log/nginx
+  #     # - ${DOCKERDIR}/logs/wp:/var/www/html/wp-content/debug.log
+  #     - ${DOCKERDIR}/conf/nginx/server-configs-nginx:/etc/nginx/custom.d
+  #     - ${DOCKERDIR}/conf/nginx/nginx.conf:/etc/nginx/nginx.conf
+  #     - ${DOCKERDIR}/conf/nginx/conf.d:/etc/nginx/conf.d
+  #     - ${DOCKERDIR}/data/wp:/var/www/html
+  #     - ${DOCKERDIR}/data/wh:/var/www/home
+  #     # - ${DOCKERDIR}/nginx/ssl:/etc/nginx/ssl:ro
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.nginx.entrypoints=websecure"
+  #     - "traefik.http.routers.nginx.rule=Host(`home.$DOMAINNAME`)"
+  #     # - "traefik.http.routers.wp.entrypoints=websecure"
+  #     # - "traefik.http.routers.wp.rule=Host(`${DOMAINNAME}`)"
+  #     - "traefik.http.services.nginx.loadbalancer.server.port=80"
+  #     - "traefik.http.routers.wp.tls=true"

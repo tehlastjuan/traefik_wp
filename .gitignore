@@ -1,0 +1,22 @@
+# env
+.env
+
+# git stuff
+.git/
+.github/
+
+# logs
+logs/
+
+# databases
+*.sql
+mysql/
+mysqldb/
+
+# wordpress
+wp/
+wpress/
+dwa_site/
+
+# submodules
+server-configs-nginx/.git*
